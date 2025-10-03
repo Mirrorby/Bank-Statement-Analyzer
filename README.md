@@ -15,7 +15,7 @@
 ## 🚀 Быстрый старт
 
 ### Онлайн версия
-Просто откройте: [https://yourusername.github.io/bank-statement-analyzer](https://yourusername.github.io/bank-statement-analyzer)
+Просто откройте: [https://mirrorby.github.io/Bank-Statement-Analyzer/](https://mirrorby.github.io/Bank-Statement-Analyzer/)
 
 ### Локальный запуск
 
