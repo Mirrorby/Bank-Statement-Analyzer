@@ -1,6 +1,7 @@
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 let allTransactions = [];
+let debugMode = true; // Включаем отладку
 
 const uploadArea = document.getElementById('uploadArea');
 const fileInput = document.getElementById('fileInput');
@@ -49,6 +50,14 @@ async function handleFiles(files) {
         await processPDFFile(file);
     }
 
+    console.log('Всего найдено транзакций:', allTransactions.length);
+
+    if (allTransactions.length === 0) {
+        document.getElementById('loading').classList.add('hidden');
+        alert('Не удалось распознать транзакции. Откройте консоль (F12) и отправьте разработчику скриншот для помощи.');
+        return;
+    }
+
     allTransactions = removeDuplicates(allTransactions);
     sortTransactions();
     updateUI();
@@ -59,13 +68,21 @@ async function handleFiles(files) {
 
 async function processPDFFile(file) {
     try {
+        console.log(`Обработка файла: ${file.name}`);
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        
+        let fullText = '';
         
         for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
             const page = await pdf.getPage(pageNum);
             const textContent = await page.getTextContent();
             
+            // Собираем весь текст страницы
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            fullText += pageText + '\n';
+            
+            // Также пробуем построчный парсинг
             const lines = {};
             textContent.items.forEach(item => {
                 const y = Math.round(item.transform[5] / 2);
@@ -86,56 +103,91 @@ async function processPDFFile(file) {
                 });
             
             sortedLines.forEach(line => {
+                if (debugMode && pageNum === 1) {
+                    console.log('Строка:', line);
+                }
                 parseTransactionLine(line);
             });
         }
+        
+        // Если построчный парсинг не сработал, пробуем парсить весь текст
+        if (allTransactions.length === 0) {
+            console.log('Построчный парсинг не дал результатов, пробуем парсить весь текст...');
+            parseFullText(fullText);
+        }
+        
     } catch (error) {
         console.error('Ошибка обработки PDF:', error);
-        alert(`Ошибка при обработке файла ${file.name}`);
+        alert(`Ошибка при обработке файла ${file.name}: ${error.message}`);
     }
+}
+
+function parseFullText(text) {
+    // Разбиваем на строки
+    const lines = text.split('\n');
+    
+    lines.forEach(line => {
+        parseTransactionLine(line);
+    });
 }
 
 function parseTransactionLine(line) {
+    if (!line || line.trim().length === 0) return;
     if (!/\d{2}\.\d{2}\.\d{4}/.test(line)) return;
-    if (/Итого|обороты|Остаток на|Выписка по|Период/i.test(line)) return;
+    if (/Итого|обороты|Остаток на|Выписка по|Период|Владелец|Номер счёта/i.test(line)) return;
     
-    const belinvest = parseBelinvestbankLine(line);
-    if (belinvest) {
-        allTransactions.push(belinvest);
+    // Пробуем все варианты парсинга
+    let transaction = null;
+    
+    transaction = parseBelinvestbankV1(line);
+    if (transaction) {
+        allTransactions.push(transaction);
         return;
     }
     
-    const bnb = parseBNBBankLine(line);
-    if (bnb) {
-        allTransactions.push(bnb);
+    transaction = parseBelinvestbankV2(line);
+    if (transaction) {
+        allTransactions.push(transaction);
+        return;
+    }
+    
+    transaction = parseBNBBankV1(line);
+    if (transaction) {
+        allTransactions.push(transaction);
+        return;
+    }
+    
+    transaction = parseBNBBankV2(line);
+    if (transaction) {
+        allTransactions.push(transaction);
         return;
     }
 }
 
-function parseBelinvestbankLine(line) {
-    const pattern = /(\d{2}\.\d{2}\.\d{4})\s+\d{2}:\d{2}\s+\d+\s+([\wА-Яа-яёЁ\s\/]+?)\s+([\d.]+)?\s+([\d.]+)\s+[\d.]+\s+BYN\s+(.+)/;
+// Белинвестбанк - вариант 1
+function parseBelinvestbankV1(line) {
+    const pattern = /(\d{2}\.\d{2}\.\d{4})\s+\d{2}:\d{2}\s+\d+\s+(.*?)\s+([\d.]+)?\s+([\d.]+)\s+[\d.]+\s+BYN\s+(.+)/;
     const match = line.match(pattern);
     
     if (!match) return null;
     
     const date = match[1];
     const type = match[2].trim();
-    const income = match[3] ? parseFloat(match[3]) : 0;
-    const expense = parseFloat(match[4]);
+    const col1 = match[3] ? parseFloat(match[3]) : 0;
+    const col2 = parseFloat(match[4]);
     const description = match[5].trim();
     
-    let amount = 0;
-    let transactionType = '';
+    let amount, transactionType;
     
-    if (income > 0 && income !== expense) {
-        amount = income;
+    if (col1 > 0 && col1 !== col2) {
+        amount = col1;
         transactionType = 'income';
-    } else if (expense > 0) {
-        amount = -expense;
+    } else if (col2 > 0) {
+        amount = -col2;
         transactionType = 'expense';
+    } else {
+        return null;
     }
-    
-    if (amount === 0) return null;
     
     return {
         date,
@@ -145,7 +197,57 @@ function parseBelinvestbankLine(line) {
     };
 }
 
-function parseBNBBankLine(line) {
+// Белинвестбанк - вариант 2 (более гибкий)
+function parseBelinvestbankV2(line) {
+    const dateMatch = line.match(/(\d{2}\.\d{2}\.\d{4})/);
+    if (!dateMatch) return null;
+    
+    const date = dateMatch[1];
+    
+    // Ищем BYN и числа вокруг него
+    const bynPattern = /([\d.]+)\s+([\d.]+)\s+BYN/g;
+    const matches = [...line.matchAll(bynPattern)];
+    
+    if (matches.length === 0) return null;
+    
+    // Берем последнее совпадение (обычно это приход/расход)
+    const lastMatch = matches[matches.length - 1];
+    const num1 = parseFloat(lastMatch[1]);
+    const num2 = parseFloat(lastMatch[2]);
+    
+    // Извлекаем описание (всё между датой и числами)
+    const descStart = line.indexOf(date) + date.length;
+    const descEnd = line.indexOf(lastMatch[0]);
+    let description = line.substring(descStart, descEnd).trim();
+    description = description.replace(/\d{2}:\d{2}/, '').replace(/\d+/, '').trim();
+    
+    let amount, type;
+    
+    if (num1 > 0 && num2 > 0 && num1 !== num2) {
+        if (num1 < num2) {
+            amount = num1;
+            type = 'income';
+        } else {
+            amount = -num1;
+            type = 'expense';
+        }
+    } else if (num1 > 0) {
+        amount = -num1;
+        type = 'expense';
+    } else {
+        return null;
+    }
+    
+    return {
+        date,
+        description: description.substring(0, 100),
+        amount,
+        type
+    };
+}
+
+// БНБ-Банк - вариант 1
+function parseBNBBankV1(line) {
     const pattern = /(\d{2}\.\d{2}\.\d{4})\s+\d{2}:\d{2}:\d{2}\s+\d{2}\.\d{2}\.\d{4}\s+(.+?)\s+([-\d,]+)\s+BYN\s+([-\d,]+)\s+BYN/;
     const match = line.match(pattern);
     
@@ -166,10 +268,40 @@ function parseBNBBankLine(line) {
     };
 }
 
+// БНБ-Банк - вариант 2
+function parseBNBBankV2(line) {
+    const dateMatch = line.match(/(\d{2}\.\d{2}\.\d{4})\s+\d{2}:\d{2}:\d{2}/);
+    if (!dateMatch) return null;
+    
+    const date = dateMatch[1];
+    
+    // Ищем паттерн: число BYN число BYN
+    const bynPattern = /([-\d,]+)\s+BYN\s+([-\d,]+)\s+BYN/;
+    const match = line.match(bynPattern);
+    
+    if (!match) return null;
+    
+    const amount = parseFloat(match[2].replace(',', '.'));
+    
+    if (isNaN(amount) || Math.abs(amount) < 0.01) return null;
+    
+    // Описание между датой и числами
+    const descStart = line.indexOf(date) + dateMatch[0].length;
+    const descEnd = line.indexOf(match[0]);
+    const description = line.substring(descStart, descEnd).trim();
+    
+    return {
+        date,
+        description: description.substring(0, 100) || 'Операция',
+        amount,
+        type: amount > 0 ? 'income' : 'expense'
+    };
+}
+
 function removeDuplicates(transactions) {
     const seen = new Set();
     return transactions.filter(t => {
-        const key = `${t.date}|${t.amount.toFixed(2)}|${t.description.substring(0, 50)}`;
+        const key = `${t.date}|${t.amount.toFixed(2)}|${t.description.substring(0, 30)}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -187,12 +319,6 @@ function sortTransactions() {
 }
 
 function updateUI() {
-    if (allTransactions.length === 0) {
-        alert('Не удалось извлечь транзакции');
-        document.getElementById('loading').classList.add('hidden');
-        return;
-    }
-
     const income = allTransactions
         .filter(t => t.type === 'income')
         .reduce((sum, t) => sum + Math.abs(t.amount), 0);
