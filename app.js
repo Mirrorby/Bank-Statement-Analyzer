@@ -1,6 +1,7 @@
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 let allTransactions = [];
+let lastParsedTransaction = null;
 
 const uploadArea = document.getElementById('uploadArea');
 const fileInput = document.getElementById('fileInput');
@@ -24,6 +25,7 @@ async function handleFiles(files) {
     allTransactions = [];
 
     for (const file of files) {
+        lastParsedTransaction = null;
         await processPDFFile(file);
     }
 
@@ -75,54 +77,65 @@ async function processPDFFile(file) {
     }
 }
 
-function parseBelinvestbankLine(line) {
+function sanitizeNumber(value) {
+    if (!value) return 0;
+    return parseFloat(value.replace(/\s+/g, '').replace(',', '.')) || 0;
+}
+
+function parseBelinvestbankLine(rawLine) {
+    if (!rawLine) return;
+
+    const line = rawLine
+        .replace(/\u00a0/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (!line) return;
+
     // Пропускаем заголовки и итоги
-    if (!line || !/\d{2}\.\d{2}\.\d{4}/.test(line)) return;
-    if (/Итого|Остаток на|Выписка|Период|Дата и время/i.test(line)) return;
-    
-    // Формат Белинвестбанка:
-    // ДД.ММ.ГГГГ ЧЧ:ММ ID_ОПЕРАЦИИ ТИП_ПЛАТЕЖА ПРИХОД РАСХОД ОСТАТОК BYN ДЕТАЛИ
-    
-    const dateMatch = line.match(/(\d{2}\.\d{2}\.\d{4})\s+\d{2}:\d{2}\s+\d+/);
-    if (!dateMatch) return;
-    
-    const date = dateMatch[1];
-    
-    // Ищем три последовательных числа перед BYN (приход, расход, остаток)
-    const pattern = /([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+BYN/;
-    const match = line.match(pattern);
-    
-    if (!match) return;
-    
-    const num1 = parseFloat(match[1]);
-    const num2 = parseFloat(match[2]);
-    const num3 = parseFloat(match[3]);
-    
-    // Определяем приход/расход:
-    // - Если num1 > 0 и num2 == 0 → приход = num1
-    // - Если num2 > 0 и num1 == 0 → расход = num2
-    // - num3 всегда остаток (не используем)
-    
-    let amount = 0;
-    let type = '';
-    
-    if (num1 > 0 && num2 === 0) {
-        // Приход
-        amount = num1;
-        type = 'income';
-    } else if (num2 > 0) {
-        // Расход
-        amount = -num2;
-        type = 'expense';
-    } else {
-        return; // Не можем определить
+    if (!/\d{2}\.\d{2}\.\d{4}/.test(line)) {
+        if (lastParsedTransaction && line.length > 3) {
+            lastParsedTransaction.description = `${lastParsedTransaction.description} ${line}`.trim();
+        }
+        return;
     }
-    
-    // Извлекаем описание (между ID и числами)
-    const descMatch = line.match(/\d+\s+(.+?)\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+BYN/);
-    const description = descMatch ? descMatch[1].trim().substring(0, 100) : 'Операция';
-    
-    allTransactions.push({ date, description, amount, type });
+
+    if (/Итого|Остаток на|Выписка|Период|Дата и время|Дата создания операции|Дата отражения/i.test(line)) {
+        return;
+    }
+
+    const linePattern = new RegExp(
+        String.raw`^(?<date>\d{2}\.\d{2}\.\d{4})\s+\d{2}:\d{2}(?:\s+\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2})?\s+\d+\s+(?<type>.+?)\s+(?<income>-?[\d\s.,]+)\s+(?<expense>-?[\d\s.,]+)\s+(?<balance>-?[\d\s.,]+)\s+BYN(?<details>.*)$`
+    );
+    const match = line.match(linePattern);
+
+    if (!match || !match.groups) {
+        if (lastParsedTransaction && line.length > 3) {
+            lastParsedTransaction.description = `${lastParsedTransaction.description} ${line}`.trim();
+        }
+        return;
+    }
+
+    const date = match.groups.date;
+    const incomeValue = sanitizeNumber(match.groups.income);
+    const expenseValue = sanitizeNumber(match.groups.expense);
+
+    const amountValue = incomeValue - expenseValue;
+    if (amountValue === 0) {
+        return;
+    }
+
+    const type = amountValue >= 0 ? 'income' : 'expense';
+    const amount = amountValue;
+
+    const descriptionParts = [];
+    if (match.groups.type) descriptionParts.push(match.groups.type.trim());
+    if (match.groups.details) descriptionParts.push(match.groups.details.trim());
+    const description = descriptionParts.join(' ').trim().substring(0, 200) || 'Операция';
+
+    const transaction = { date, description, amount, type };
+    allTransactions.push(transaction);
+    lastParsedTransaction = transaction;
 }
 
 function removeDuplicates(transactions) {
