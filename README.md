@@ -23,3 +23,16 @@
 ```bash
 git clone https://github.com/yourusername/bank-statement-analyzer.git
 cd bank-statement-analyzer
+
+## 🤖 Google Apps Script: проверка Telegram-каналов на #реклама + ya.cc
+
+Добавлен скрипт `telegram_ads_audit.gs` для Google Sheets:
+
+- Берет ссылки на каналы из колонки `A` (начиная со 2-й строки).
+- Проверяет последние 30 постов каждого публичного канала.
+- Считает:
+  - сколько постов содержат `#реклама`;
+  - сколько постов одновременно содержат `#реклама` и ссылку на рекламодателя, начинающуюся с `https://ya.cc`.
+- Пишет результат в колонки `B-I`.
+
+> Важно: invite/private-ссылки вида `https://t.me/+...` недоступны через публичный HTML Telegram без авторизации, поэтому для них ставится статус `INVITE_LINK_UNAVAILABLE`.
